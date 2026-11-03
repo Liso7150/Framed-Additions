@@ -10,6 +10,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.entity.BlockEntityType;
+import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
@@ -33,6 +34,7 @@ public class FramedAdditions {
     public FramedAdditions() {
         IEventBus modEventBus = FMLJavaModLoadingContext.get().getModEventBus();
         modEventBus.register(Registration.class);
+        modEventBus.addListener(FramedRecipePack::addPackFinders);
     }
 
     private static final class Registration {
@@ -71,8 +73,8 @@ public class FramedAdditions {
                     event.register(Registries.BLOCK, id, () -> framed);
                     FramedRegistry.BLOCKS.add((CopiedFramedBlock) framed);
                     registered++;
-                } catch (RuntimeException exception) {
-                    LOGGER.warn("Skipped framed copy of {}: {}", sourceId, exception.toString());
+                } catch (Throwable exception) {
+                    LOGGER.warn("Skipped framed copy of {}", sourceId, exception);
                 }
             }
             LOGGER.info("Registered {} framed block copies", registered);
@@ -133,6 +135,19 @@ public class FramedAdditions {
                             })
                             .build()
             );
+        }
+    }
+
+    @Mod.EventBusSubscriber(modid = MODID)
+    private static final class SourceShapes {
+        private SourceShapes() {
+        }
+
+        @SubscribeEvent
+        public static void onServerTick(TickEvent.ServerTickEvent event) {
+            if (event.phase == TickEvent.Phase.END) {
+                CopiedBlockType.enableSourceShapes();
+            }
         }
     }
 }

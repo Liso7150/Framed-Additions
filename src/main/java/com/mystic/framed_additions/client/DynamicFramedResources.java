@@ -1,34 +1,32 @@
 package com.mystic.framed_additions.client;
 
-import com.google.gson.JsonObject;
 import com.mystic.framed_additions.CopiedFramedBlock;
 import com.mystic.framed_additions.FramedAdditions;
+import com.mystic.framed_additions.FramedRegistry;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.AbstractPackResources;
 import net.minecraft.server.packs.PackResources;
 import net.minecraft.server.packs.PackType;
-import net.minecraft.server.packs.metadata.MetadataSectionSerializer;
 import net.minecraft.server.packs.repository.Pack;
 import net.minecraft.server.packs.repository.PackSource;
 import net.minecraft.server.packs.resources.IoSupplier;
-import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraftforge.event.AddPackFindersEvent;
 import net.minecraftforge.registries.ForgeRegistries;
 import org.jetbrains.annotations.Nullable;
 
 import java.io.ByteArrayInputStream;
-import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 
 public final class DynamicFramedResources extends AbstractPackResources {
     private static final String PACK_ID = "framed_additions_dynamic";
+    private static final IoSupplier<InputStream> PACK_META = supplier("{\"pack\":{\"description\":\"framed additions\",\"pack_format\":15}}");
+    private static final IoSupplier<InputStream> LANG = supplier("{\"itemGroup.framed_additions\":\"Framed Additions\",\"item.framed_additions.copy\":\"Framed %s\"}");
+    private static volatile Map<String, IoSupplier<InputStream>> index;
 
     private DynamicFramedResources() {
         super(PACK_ID, true);
@@ -58,7 +56,7 @@ public final class DynamicFramedResources extends AbstractPackResources {
     @Override
     public IoSupplier<InputStream> getRootResource(String... paths) {
         if (paths.length == 1 && "pack.mcmeta".equals(paths[0])) {
-            return supplier("{\"pack\":{\"description\":\"framed additions\",\"pack_format\":15}}");
+            return PACK_META;
         }
         return null;
     }
@@ -69,17 +67,7 @@ public final class DynamicFramedResources extends AbstractPackResources {
         if (type != PackType.CLIENT_RESOURCES || !FramedAdditions.MODID.equals(location.getNamespace())) {
             return null;
         }
-        String path = location.getPath();
-        if (path.startsWith("blockstates/")) {
-            return blockstate(path.substring("blockstates/".length()));
-        }
-        if (path.startsWith("models/item/")) {
-            return itemModel(path.substring("models/item/".length()));
-        }
-        if ("lang/en_us.json".equals(path)) {
-            return supplier("{\"itemGroup.framed_additions\":\"Framed Additions\",\"item.framed_additions.copy\":\"Framed %s\"}");
-        }
-        return null;
+        return index().get(location.getPath());
     }
 
     @Override
@@ -87,11 +75,20 @@ public final class DynamicFramedResources extends AbstractPackResources {
         if (type != PackType.CLIENT_RESOURCES || !FramedAdditions.MODID.equals(namespace)) {
             return;
         }
-        if ("lang".equals(prefix)) {
-            ResourceLocation lang = new ResourceLocation(FramedAdditions.MODID, "lang/en_us.json");
-            IoSupplier<InputStream> supplier = getResource(type, lang);
-            if (supplier != null) {
-                output.accept(lang, supplier);
+        Map<String, IoSupplier<InputStream>> files = index();
+        String path = prefix.endsWith("/") ? prefix.substring(0, prefix.length() - 1) : prefix;
+        IoSupplier<InputStream> exact = files.get(path);
+        if (exact != null) {
+            output.accept(new ResourceLocation(FramedAdditions.MODID, path), exact);
+            return;
+        }
+        if (path.endsWith(".json")) {
+            return;
+        }
+        String start = path.isEmpty() ? "" : path + "/";
+        for (Map.Entry<String, IoSupplier<InputStream>> entry : files.entrySet()) {
+            if (entry.getKey().startsWith(start)) {
+                output.accept(new ResourceLocation(FramedAdditions.MODID, entry.getKey()), entry.getValue());
             }
         }
     }
@@ -101,78 +98,34 @@ public final class DynamicFramedResources extends AbstractPackResources {
         return type == PackType.CLIENT_RESOURCES ? Set.of(FramedAdditions.MODID) : Set.of();
     }
 
-    @Nullable
-    @Override
-    public <T> T getMetadataSection(MetadataSectionSerializer<T> serializer) throws IOException {
-        if (!"pack".equals(serializer.getMetadataSectionName())) {
-            return null;
-        }
-        JsonObject pack = new JsonObject();
-        pack.addProperty("description", "framed additions");
-        pack.addProperty("pack_format", 15);
-        JsonObject root = new JsonObject();
-        root.add("pack", pack);
-        return serializer.fromJson(root);
-    }
-
     @Override
     public void close() {
     }
 
-    @Nullable
-    private static IoSupplier<InputStream> blockstate(String path) {
-        CopiedFramedBlock block = find(path);
-        if (block == null) {
-            return null;
+    private static Map<String, IoSupplier<InputStream>> index() {
+        Map<String, IoSupplier<InputStream>> current = index;
+        if (current != null) {
+            return current;
         }
-        StringBuilder json = new StringBuilder("{\"variants\":{");
-        boolean first = true;
-        for (BlockState state : block.getStateDefinition().getPossibleStates()) {
-            if (!first) {
-                json.append(',');
+        synchronized (DynamicFramedResources.class) {
+            if (index == null) {
+                Map<String, IoSupplier<InputStream>> built = new HashMap<>();
+                for (CopiedFramedBlock block : FramedRegistry.BLOCKS) {
+                    ResourceLocation id = ForgeRegistries.BLOCKS.getKey(block);
+                    ResourceLocation sourceId = ForgeRegistries.BLOCKS.getKey(block.source());
+                    if (id == null || sourceId == null) {
+                        continue;
+                    }
+                    String path = id.getPath();
+                    built.put("blockstates/" + path + ".json", supplier("{\"multipart\":[{\"apply\":{\"model\":\"framed_additions:block/" + path + "\"}}]}"));
+                    built.put("models/block/" + path + ".json", supplier("{\"loader\":\"framed_additions:copy\",\"source\":\"" + sourceId + "\"}"));
+                    built.put("models/item/" + path + ".json", supplier("{\"parent\":\"framed_additions:block/" + path + "\"}"));
+                }
+                built.put("lang/en_us.json", LANG);
+                index = built;
             }
-            first = false;
-            json.append('"').append(variantKey(state)).append("\":{\"model\":\"framedblocks:block/framed_cube\"}");
+            return index;
         }
-        json.append("}}");
-        return supplier(json.toString());
-    }
-
-    @Nullable
-    private static IoSupplier<InputStream> itemModel(String path) {
-        if (find(path) == null) {
-            return null;
-        }
-        return supplier("{\"parent\":\"framedblocks:block/framed_cube\"}");
-    }
-
-    @Nullable
-    private static CopiedFramedBlock find(String path) {
-        if (path.endsWith(".json")) {
-            path = path.substring(0, path.length() - ".json".length());
-        }
-        ResourceLocation id = new ResourceLocation(FramedAdditions.MODID, path);
-        if (ForgeRegistries.BLOCKS.getValue(id) instanceof CopiedFramedBlock block) {
-            return block;
-        }
-        return null;
-    }
-
-    private static String variantKey(BlockState state) {
-        List<Property<?>> properties = new ArrayList<>(state.getProperties());
-        properties.sort(Comparator.comparing(Property::getName));
-        StringBuilder key = new StringBuilder();
-        for (Property<?> property : properties) {
-            if (key.length() > 0) {
-                key.append(',');
-            }
-            key.append(property.getName()).append('=').append(propertyValue(state, property));
-        }
-        return key.toString();
-    }
-
-    private static <T extends Comparable<T>> String propertyValue(BlockState state, Property<T> property) {
-        return property.getName(state.getValue(property));
     }
 
     private static IoSupplier<InputStream> supplier(String text) {
