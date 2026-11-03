@@ -67,6 +67,7 @@ public class CopiedFramedModel extends BakedModelProxy {
         TextureAtlasSprite sprite = bare ? frameSprite() : null;
         BakedModel camoModel = bare ? null : Minecraft.getInstance().getBlockRenderer().getBlockModel(camo);
         List<BakedQuad> quads = new ArrayList<>(geometry.size());
+        int[] faceQuadIndices = new int[Direction.values().length + 1];
         for (BakedQuad quad : geometry) {
             if (quad.getDirection() != null && framedData != null && framedData.isSideHidden(quad.getDirection())) {
                 continue;
@@ -74,7 +75,17 @@ public class CopiedFramedModel extends BakedModelProxy {
             if (bare) {
                 quads.add(retexture(quad, sprite, -1));
             } else {
-                quads.add(retexture(quad, spriteFor(quad, camo, camoModel, layer), tintFor(quad, camo, camoModel, layer)));
+                int faceIndex = quad.getDirection() == null
+                        ? Direction.values().length
+                        : quad.getDirection().ordinal();
+                BakedQuad camoQuad = camoModel == null ? null
+                        : sampleQuad(camoModel, camo, quad.getDirection(), layer, faceQuadIndices[faceIndex]);
+                faceQuadIndices[faceIndex]++;
+                TextureAtlasSprite camoSprite = camoQuad == null
+                        ? (camoModel == null ? frameSprite() : camoModel.getParticleIcon())
+                        : camoQuad.getSprite();
+                int tintIndex = camoQuad == null ? -1 : camoQuad.getTintIndex();
+                quads.add(retexture(quad, camoSprite, tintIndex));
             }
         }
         return quads;
@@ -167,38 +178,31 @@ public class CopiedFramedModel extends BakedModelProxy {
         return layers.iterator().next();
     }
 
-    private TextureAtlasSprite spriteFor(BakedQuad sourceQuad, @Nullable BlockState camo, @Nullable BakedModel camoModel, RenderType layer) {
-        if (camoModel == null) {
-            return frameSprite();
-        }
-        BakedQuad sample = sampleQuad(camoModel, camo, sourceQuad.getDirection(), layer);
-        return sample == null ? camoModel.getParticleIcon() : sample.getSprite();
-    }
-
-    private static int tintFor(BakedQuad sourceQuad, @Nullable BlockState camo, @Nullable BakedModel camoModel, RenderType layer) {
-        if (camoModel == null) {
-            return -1;
-        }
-        BakedQuad sample = sampleQuad(camoModel, camo, sourceQuad.getDirection(), layer);
-        return sample == null ? -1 : sample.getTintIndex();
-    }
-
     @Nullable
-    private static BakedQuad sampleQuad(BakedModel model, BlockState state, @Nullable Direction side, RenderType layer) {
+    private static BakedQuad sampleQuad(BakedModel model, BlockState state, @Nullable Direction side, RenderType layer, int faceIndex) {
+        STABLE_RANDOM.setSeed(0L);
         List<BakedQuad> quads = model.getQuads(state, side, STABLE_RANDOM, ModelData.EMPTY, layer);
         if (quads.isEmpty()) {
             quads = model.getQuads(state, side, STABLE_RANDOM);
         }
+        if (!quads.isEmpty()) {
+            return quads.get(Math.min(faceIndex, quads.size() - 1));
+        }
         if (quads.isEmpty() && side != null) {
             quads = model.getQuads(state, null, STABLE_RANDOM, ModelData.EMPTY, layer);
+            if (quads.isEmpty()) {
+                quads = model.getQuads(state, null, STABLE_RANDOM);
+            }
+            int matchingIndex = 0;
             for (BakedQuad quad : quads) {
                 if (quad.getDirection() == side) {
-                    return quad;
+                    if (matchingIndex++ == faceIndex) {
+                        return quad;
+                    }
                 }
             }
-            return quads.isEmpty() ? null : quads.get(0);
         }
-        return quads.isEmpty() ? null : quads.get(0);
+        return null;
     }
 
     private static BakedQuad retexture(BakedQuad quad, TextureAtlasSprite sprite, int tintIndex) {
