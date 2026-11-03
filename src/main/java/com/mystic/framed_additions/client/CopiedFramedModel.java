@@ -5,6 +5,8 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.block.model.BakedQuad;
+import net.minecraft.client.renderer.block.model.ItemOverrides;
+import net.minecraft.client.renderer.block.model.ItemTransforms;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.client.resources.model.BakedModel;
 import net.minecraft.core.Direction;
@@ -52,12 +54,16 @@ public class CopiedFramedModel extends BakedModelProxy {
         BlockState sourceState = block.copiedType().toSourceState(framedState);
         BlockState camo = framedData == null ? null : framedData.getCamoState();
         boolean bare = camo == null || camo.isAir();
-        RenderType layer = bare ? RenderType.cutout() : primaryLayer(camo);
-        if (renderType != null && renderType != layer) {
+        ChunkRenderTypeSet camoLayers = bare ? ModelUtils.CUTOUT : ModelCache.getCamoRenderTypes(camo, rand, data);
+        RenderType layer = renderType == null ? (bare ? RenderType.cutout() : primaryLayer(camo, data)) : renderType;
+        if (renderType != null && !camoLayers.contains(renderType)) {
             return List.of();
         }
 
         BakedModel variant = sourceModel(sourceState);
+        if (variant == null) {
+            return List.of();
+        }
         // The random source selects weighted model variants. The same seed is used for every face.
         List<BakedQuad> geometry = variant.getQuads(sourceState, side, rand);
         if (geometry.isEmpty()) {
@@ -79,7 +85,7 @@ public class CopiedFramedModel extends BakedModelProxy {
                         ? Direction.values().length
                         : quad.getDirection().ordinal();
                 BakedQuad camoQuad = camoModel == null ? null
-                        : sampleQuad(camoModel, camo, quad.getDirection(), layer, faceQuadIndices[faceIndex]);
+                        : sampleQuad(camoModel, camo, quad.getDirection(), layer, faceQuadIndices[faceIndex], ModelUtils.getCamoModelData(data));
                 faceQuadIndices[faceIndex]++;
                 TextureAtlasSprite camoSprite = camoQuad == null
                         ? (camoModel == null ? frameSprite() : camoModel.getParticleIcon())
@@ -98,7 +104,7 @@ public class CopiedFramedModel extends BakedModelProxy {
         if (camo == null || camo.isAir()) {
             return ModelUtils.CUTOUT;
         }
-        return ChunkRenderTypeSet.of(primaryLayer(camo));
+        return ModelCache.getCamoRenderTypes(camo, rand, data);
     }
 
     @Override
@@ -108,22 +114,61 @@ public class CopiedFramedModel extends BakedModelProxy {
 
     @Override
     public boolean isGui3d() {
-        return sourceModel(block.copiedType().toSourceState(block.defaultBlockState())).isGui3d();
+        BakedModel model = sourceModel(block.copiedType().toSourceState(block.defaultBlockState()));
+        return model == null || model.isGui3d();
     }
 
     @Override
     public boolean usesBlockLight() {
-        return sourceModel(block.copiedType().toSourceState(block.defaultBlockState())).usesBlockLight();
+        BakedModel model = sourceModel(block.copiedType().toSourceState(block.defaultBlockState()));
+        return model == null || model.usesBlockLight();
     }
 
     @Override
     public boolean useAmbientOcclusion() {
-        return sourceModel(block.copiedType().toSourceState(block.defaultBlockState())).useAmbientOcclusion();
+        BakedModel model = sourceModel(block.copiedType().toSourceState(block.defaultBlockState()));
+        return model == null || model.useAmbientOcclusion();
+    }
+
+    @Override
+    public boolean useAmbientOcclusion(BlockState state) {
+        return sourceAmbientOcclusion(block.copiedType().toSourceState(state));
+    }
+
+    @Override
+    public boolean useAmbientOcclusion(BlockState state, RenderType renderType) {
+        // The render type here belongs to the applied camouflage, not the copied
+        // source model. Passing it through can make AO change between render passes.
+        return sourceAmbientOcclusion(block.copiedType().toSourceState(state));
+    }
+
+    private boolean sourceAmbientOcclusion(BlockState sourceState) {
+        BakedModel model = sourceModel(sourceState);
+        return model == null || model.useAmbientOcclusion(sourceState);
+    }
+
+    @Override
+    public boolean isCustomRenderer() {
+        return false;
+    }
+
+    @Override
+    public ItemOverrides getOverrides() {
+        return ItemOverrides.EMPTY;
+    }
+
+    @Override
+    public ItemTransforms getTransforms() {
+        BakedModel model = sourceModel(block.copiedType().toSourceState(block.defaultBlockState()));
+        return model == null ? ItemTransforms.NO_TRANSFORMS : model.getTransforms();
     }
 
     @Override
     public BakedModel applyTransform(ItemDisplayContext context, PoseStack poseStack, boolean applyLeftHandTransform) {
-        sourceModel(block.copiedType().toSourceState(block.defaultBlockState())).applyTransform(context, poseStack, applyLeftHandTransform);
+        BakedModel model = sourceModel(block.copiedType().toSourceState(block.defaultBlockState()));
+        if (model != null) {
+            model.applyTransform(context, poseStack, applyLeftHandTransform);
+        }
         return this;
     }
 
@@ -142,24 +187,26 @@ public class CopiedFramedModel extends BakedModelProxy {
         return frameSprite();
     }
 
+    @Nullable
     private BakedModel sourceModel(BlockState sourceState) {
         try {
             BakedModel model = ModelCache.getModel(sourceState);
-            if (model != null) {
+            if (model != null && model != Minecraft.getInstance().getModelManager().getMissingModel()) {
                 return model;
             }
         } catch (RuntimeException ignored) {
-            // Model lookup can run before the bakery is ready. The missing model stands in until it is.
+            // Model lookup can run before the bakery is ready; retry on the next render call.
         }
-        return Minecraft.getInstance().getModelManager().getMissingModel();
+        return null;
     }
 
     private static TextureAtlasSprite frameSprite() {
         return Minecraft.getInstance().getTextureAtlas(InventoryMenu.BLOCK_ATLAS).apply(FRAME_TEXTURE);
     }
 
-    private static RenderType primaryLayer(BlockState camo) {
-        ChunkRenderTypeSet layers = ModelCache.getCamoRenderTypes(camo, STABLE_RANDOM, ModelData.EMPTY);
+    private static RenderType primaryLayer(BlockState camo, ModelData data) {
+        STABLE_RANDOM.setSeed(0L);
+        ChunkRenderTypeSet layers = ModelCache.getCamoRenderTypes(camo, STABLE_RANDOM, data);
         if (layers.contains(RenderType.translucent()) && !layers.contains(RenderType.solid())) {
             return RenderType.translucent();
         }
@@ -179,9 +226,9 @@ public class CopiedFramedModel extends BakedModelProxy {
     }
 
     @Nullable
-    private static BakedQuad sampleQuad(BakedModel model, BlockState state, @Nullable Direction side, RenderType layer, int faceIndex) {
+    private static BakedQuad sampleQuad(BakedModel model, BlockState state, @Nullable Direction side, RenderType layer, int faceIndex, ModelData modelData) {
         STABLE_RANDOM.setSeed(0L);
-        List<BakedQuad> quads = model.getQuads(state, side, STABLE_RANDOM, ModelData.EMPTY, layer);
+        List<BakedQuad> quads = model.getQuads(state, side, STABLE_RANDOM, modelData, layer);
         if (quads.isEmpty()) {
             quads = model.getQuads(state, side, STABLE_RANDOM);
         }
@@ -189,7 +236,7 @@ public class CopiedFramedModel extends BakedModelProxy {
             return quads.get(Math.min(faceIndex, quads.size() - 1));
         }
         if (quads.isEmpty() && side != null) {
-            quads = model.getQuads(state, null, STABLE_RANDOM, ModelData.EMPTY, layer);
+            quads = model.getQuads(state, null, STABLE_RANDOM, modelData, layer);
             if (quads.isEmpty()) {
                 quads = model.getQuads(state, null, STABLE_RANDOM);
             }
